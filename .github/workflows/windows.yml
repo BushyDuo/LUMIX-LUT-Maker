@@ -1,0 +1,134 @@
+name: Windows x64
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and package Windows x64
+    runs-on: windows-2025
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Read and verify version
+        id: package
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq "lumix-33-lut-maker" } | Select-Object -First 1
+          if (-not $package) { throw "Package metadata not found." }
+          "version=$($package.version)" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $expected = "v$($package.version)"
+            if ($env:GITHUB_REF_NAME -ne $expected) {
+              throw "Tag $env:GITHUB_REF_NAME does not match Cargo version $expected."
+            }
+          }
+
+      - name: Verify bundled asset checksums
+        shell: pwsh
+        run: |
+          $icc = (Get-FileHash -Algorithm SHA256 "assets\color\sRGB2014.icc").Hash.ToLowerInvariant()
+          $font = (Get-FileHash -Algorithm SHA256 "assets\fonts\NotoSansCJKsc-Regular.otf").Hash.ToLowerInvariant()
+          $p3 = (Get-FileHash -Algorithm SHA256 "tests\fixtures\icc\DisplayP3Compat-v4.icc").Hash.ToLowerInvariant()
+          $adobe = (Get-FileHash -Algorithm SHA256 "tests\fixtures\icc\AdobeCompat-v2.icc").Hash.ToLowerInvariant()
+          $testImage = (Get-FileHash -Algorithm SHA256 "assets\default-preview\test-image.jpg").Hash.ToLowerInvariant()
+          $chart = (Get-FileHash -Algorithm SHA256 "LUT_Color_Test_Chart.png").Hash.ToLowerInvariant()
+          if ($icc -ne "384b832de3412066743b52a75ee906b6fb9fb8d9e09e936fc2c43223815c6e0a") {
+            throw "The bundled ICC profile differs from the reviewed official file."
+          }
+          if ($font -ne "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b") {
+            throw "The bundled Noto Sans CJK SC font differs from the reviewed upstream file."
+          }
+          if ($p3 -ne "231752984cd4a5278e1b8d2390fe496767d4511fc81f54e1a5c69ae9ab4c42b5") {
+            throw "The Display P3 test profile differs from the reviewed CC0 file."
+          }
+          if ($adobe -ne "60fb2adecacf82132db0b1c09b303316f3bbd9e2823e7ba096d01627d12d57c9") {
+            throw "The Adobe RGB-compatible test profile differs from the reviewed CC0 file."
+          }
+          if ($testImage -ne "65a561c067a30909c67161e1f83fe2d13dfdeadfac73b4099000ca285ca02987") {
+            throw "The built-in Test Image preview differs from the reviewed file."
+          }
+          if ($chart -ne "37b48ccd1e7d11e6def5ad934598cd0cbcdb80c1f5573cc0d01012838743f627") {
+            throw "The built-in LUT diagnostic chart differs from the reviewed file."
+          }
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build release executable
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Create single-file portable EXE
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version "${{ steps.package.outputs.version }}"
+
+      - name: Verify static C runtime linkage
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw "Visual Studio C++ tools were not found." }
+          $dumpbin = Get-ChildItem "$installation\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe was not found." }
+          $exe = "dist\${{ steps.package.outputs.version }}\LUMIX-LUT-Maker-${{ steps.package.outputs.version }}-windows-x64.exe"
+          $dependencies = (& $dumpbin.FullName /dependents $exe | Out-String)
+          if ($dependencies -match "(?i)VCRUNTIME|MSVCP|UCRTBASE|api-ms-win-crt") {
+            throw "The EXE still depends on a dynamically linked Microsoft C runtime: $dependencies"
+          }
+
+      - name: Upload workflow artifacts
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: LUMIX-LUT-Maker-${{ steps.package.outputs.version }}-windows-x64
+          path: dist/${{ steps.package.outputs.version }}/LUMIX-LUT-Maker-${{ steps.package.outputs.version }}-windows-x64.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish tagged Windows artifacts
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: LUMIX-LUT-Maker-${{ needs.build.outputs.version }}-windows-x64
+          path: release-assets
+
+      - name: Attach files to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/LUMIX-LUT-Maker-${{ needs.build.outputs.version }}-windows-x64.exe

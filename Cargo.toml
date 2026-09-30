@@ -1,0 +1,61 @@
+[package]
+name = "lumix-33-lut-maker"
+version = "0.7.4"
+edition = "2024"
+authors = ["LUMIX LUT Maker contributors"]
+description = "Offline macOS and Windows utility for creating and previewing 17, 25, 33, and 64-grid CUBE LUTs"
+license = "MIT"
+
+[lib]
+name = "lumix_lut"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lumix-33-lut-maker"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.35.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
+rayon = "1.12.0"
+rfd = "0.15.4"
+thiserror = "2.0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-image-io = "0.3.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Imaging",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+[build-dependencies]
+winresource = "0.1.31"
+
+[dev-dependencies]
+editpe = "=0.2.3"
+tempfile = "3.23.0"
+ttf-parser = "0.25.1"
+
+[package.metadata.bundle]
+name = "LUMIX LUT Maker"
+identifier = "com.local.lumix33lutmaker"
+version = "0.7.4"
+icon = ["assets/AppIcon.icns"]
+resources = ["LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "assets/fonts/OFL.txt"]
+copyright = "Copyright 2026 LUMIX LUT Maker contributors"
+category = "public.app-category.photography"
+short_description = "Create, preview, and validate variable-grid CUBE LUTs"
+osx_minimum_system_version = "13.0"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
