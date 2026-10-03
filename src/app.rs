@@ -2658,7 +2658,11 @@ mod tests {
     fn single_executable_contains_required_license_texts() {
         assert!(PROJECT_LICENSE_TEXT.contains("MIT License"));
         assert!(THIRD_PARTY_TEXT.contains("Noto Sans CJK SC"));
-        assert!(THIRD_PARTY_TEXT.contains("No permission for commercial reuse"));
+        let notices = THIRD_PARTY_TEXT
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(notices.contains("No permission for commercial reuse"));
         assert!(LUT_UTILITY_LICENSE_TEXT.contains("Copyright (c) 2025 Christian Schrinner"));
         assert!(NOTO_OFL_TEXT.contains("SIL OPEN FONT LICENSE Version 1.1"));
     }
