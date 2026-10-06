@@ -445,7 +445,7 @@ fn validate_photo_icc(profile: &[u8]) -> Result<(), String> {
     if declared < 132 || declared > profile.len() || tags > (declared - 132) / 12 {
         return Err("照片包含损坏的 ICC：配置文件或标签表长度无效。".to_owned());
     }
-    for entry in profile[132..132 + tags * 12].chunks_exact(12) {
+    for entry in profile[132..132 + tags * 12].as_chunks::<12>().0 {
         let offset = u32::from_be_bytes(entry[4..8].try_into().unwrap()) as usize;
         let size = u32::from_be_bytes(entry[8..12].try_into().unwrap()) as usize;
         if offset > declared || size > declared - offset {
