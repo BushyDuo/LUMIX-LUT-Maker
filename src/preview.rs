@@ -242,6 +242,9 @@ fn decode_photo_with_limit(path: &Path, max_edge: usize) -> Result<PreviewBitmap
         let embedded_icc = metadata_decoder
             .icc_profile()
             .map_err(|error| format!("无法读取照片 ICC：{error}"))?;
+        if let Some(profile) = &embedded_icc {
+            validate_photo_icc(profile)?;
+        }
         (Some(orientation), embedded_icc)
     };
 
@@ -317,6 +320,7 @@ fn decode_photo_with_limit(path: &Path, max_edge: usize) -> Result<PreviewBitmap
     }
 
     let warnings = if let Some(profile) = embedded_icc {
+        validate_photo_icc(&profile)?;
         // SAFETY: Both color contexts are initialized from complete in-memory ICC profiles.
         let source_context = unsafe { factory.CreateColorContext() }
             .map_err(|error| format!("无法创建照片 ICC 上下文：{error}"))?;
@@ -336,7 +340,7 @@ fn decode_photo_with_limit(path: &Path, max_edge: usize) -> Result<PreviewBitmap
                 &GUID_WICPixelFormat32bppPRGBA,
             )
         }
-        .map_err(|error| format!("无法把照片颜色转换为 sRGB：{error}"))?;
+        .map_err(|error| format!("无法将照片 ICC 颜色转换为 sRGB：{error}"))?;
         source = color_transform
             .cast()
             .map_err(|error| format!("无法读取 sRGB 照片：{error}"))?;
@@ -418,13 +422,37 @@ fn windows_orientation(
         Orientation::Rotate270 => WICBitmapTransformRotate270,
         Orientation::FlipHorizontal => WICBitmapTransformFlipHorizontal,
         Orientation::FlipVertical => WICBitmapTransformFlipVertical,
+        // WIC combines the horizontal flip before rotation; image::Orientation
+        // names it after rotation. Reverse the angle for the mirrored cases.
         Orientation::Rotate90FlipH => WICBitmapTransformOptions(
-            WICBitmapTransformRotate90.0 | WICBitmapTransformFlipHorizontal.0,
-        ),
-        Orientation::Rotate270FlipH => WICBitmapTransformOptions(
             WICBitmapTransformRotate270.0 | WICBitmapTransformFlipHorizontal.0,
         ),
+        Orientation::Rotate270FlipH => WICBitmapTransformOptions(
+            WICBitmapTransformRotate90.0 | WICBitmapTransformFlipHorizontal.0,
+        ),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn validate_photo_icc(profile: &[u8]) -> Result<(), String> {
+    // Reject broken headers before WIC opens the frame; some codecs otherwise
+    // report only a generic image error for malformed embedded profiles.
+    if profile.len() < 132 || profile.get(36..40) != Some(b"acsp") {
+        return Err("照片包含损坏的 ICC：配置文件头无效。".to_owned());
+    }
+    let declared = u32::from_be_bytes(profile[..4].try_into().unwrap()) as usize;
+    let tags = u32::from_be_bytes(profile[128..132].try_into().unwrap()) as usize;
+    if declared < 132 || declared > profile.len() || tags > (declared - 132) / 12 {
+        return Err("照片包含损坏的 ICC：配置文件或标签表长度无效。".to_owned());
+    }
+    for entry in profile[132..132 + tags * 12].chunks_exact(12) {
+        let offset = u32::from_be_bytes(entry[4..8].try_into().unwrap()) as usize;
+        let size = u32::from_be_bytes(entry[8..12].try_into().unwrap()) as usize;
+        if offset > declared || size > declared - offset {
+            return Err("照片包含损坏的 ICC：标签数据越界。".to_owned());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -795,7 +823,26 @@ mod tests {
         let path = directory.path().join("damaged-icc.png");
         write_profiled_png(&path, [128, 128, 128], b"not an ICC profile");
         let error = decode_preview_photo(&path).unwrap_err();
-        assert!(error.contains("ICC"));
+        assert!(error.contains("ICC"), "Unexpected error: {error}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wic_icc_validation_accepts_bundled_profiles_and_rejects_truncated_tags() {
+        for profile in [
+            lumix_lut::srgb_icc_profile(),
+            include_bytes!("../tests/fixtures/icc/DisplayP3Compat-v4.icc").as_slice(),
+            include_bytes!("../tests/fixtures/icc/AdobeCompat-v2.icc").as_slice(),
+        ] {
+            validate_photo_icc(profile).unwrap();
+        }
+        assert!(validate_photo_icc(b"not an ICC profile").is_err());
+        let mut broken = lumix_lut::srgb_icc_profile().to_vec();
+        broken.truncate(132);
+        assert!(validate_photo_icc(&broken).is_err());
+        let mut broken = lumix_lut::srgb_icc_profile().to_vec();
+        broken[136..140].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(validate_photo_icc(&broken).is_err());
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
